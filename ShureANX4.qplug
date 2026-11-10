@@ -1,0 +1,931 @@
+-- Shure ANX4 Scalable Wireless Receiver - Q-SYS Plugin
+-- Control via Shure command strings (TCP 2202).
+-- Supports Axient Digital and ULX-D transmission modes, 1-24 licensed channels.
+--
+-- Prerequisite on the ANX4: Device Configuration > Network Services > Command Strings = ON
+-- Audio is NOT carried by this plugin - route it via Dante / AES67 as usual.
+
+PluginInfo = {
+  Name = "Shure~ANX4 Scalable Wireless Receiver",
+  Version = "1.0.0",
+  BuildVersion = "1.0.0.0",
+  Id = "72c7835a-4a1f-4275-9747-3ad1ada208ee",
+  Author = "",
+  Description = "Control and monitoring of the Shure ANX4 (Axient Digital / ULX-D modes): RF, audio metering, battery, mute, gain, frequency and transmitter status.",
+  ShowDebug = true,
+}
+
+-------------------------------------------------------------------------------
+-- Shared definitions (used by design-time and runtime code)
+-------------------------------------------------------------------------------
+
+local MODE_AD   = "Axient Digital"
+local MODE_ULXD = "ULX-D"
+local MAX_CHANNELS = 24
+local PORT = 2202
+
+-- Layout columns on each channel page
+local COLS = { "Audio", "RF", "Meters", "Transmitter", "Battery" }
+
+-- Per-channel control specification. One source of truth for GetControls,
+-- GetControlLayout and the runtime.
+--   ct   = ControlType, bt = ButtonType, it = IndicatorType
+--   mode = nil (both) | "AD" | "ULXD"
+--   col  = column index into COLS, lbl = label on the channel page
+local CH = {
+  -- Audio
+  { name="Channel Name",   ct="Text",      pin="Both",   col=1, lbl="Name (8 char set)" },
+  { name="Dante Name",     ct="Indicator", it="Text",    pin="Output", col=1, lbl="Dante Ch Name" },
+  { name="Available",      ct="Indicator", it="Led",     pin="Output", col=1, lbl="Available", color="#FF00C000" },
+  { name="Mute",           ct="Button",    bt="Toggle",  pin="Both",   col=1, lbl="Mute", color="#FFE00000" },
+  { name="Gain",           ct="Knob",      unit="dB", min=-18, max=42, pin="Both", col=1, lbl="Gain", style="Knob", w=36, h=36 },
+  { name="Flash",          ct="Button",    bt="Trigger", pin="Input",  col=1, lbl="Identify" },
+  { name="Alarm",          ct="Indicator", it="Led",     pin="Output", col=1, lbl="Alarm (any)", color="#FFFF2020" },
+
+  -- RF
+  { name="Frequency",      ct="Text",      pin="Both",   col=2, lbl="Frequency (MHz)" },
+  { name="Group Channel",  ct="Text",      pin="Both",   col=2, lbl="Group,Channel" },
+  { name="Frequency 2",    ct="Text",      pin="Both",   col=2, lbl="Frequency 2 (FD-C)", mode="AD" },
+  { name="Group Channel 2",ct="Text",      pin="Both",   col=2, lbl="Group,Chan 2 (FD-C)", mode="AD" },
+  { name="RF Band",        ct="Indicator", it="Text",    pin="Output", col=2, lbl="RF Band" },
+  { name="Antenna Config", ct="Indicator", it="Text",    pin="Output", col=2, lbl="Antenna Config" },
+  { name="FD Mode",        ct="Indicator", it="Text",    pin="Output", col=2, lbl="Freq Diversity", mode="AD" },
+  { name="Interference",   ct="Indicator", it="Led",     pin="Output", col=2, lbl="Interference", color="#FFFF2020" },
+  { name="Interference 2", ct="Indicator", it="Led",     pin="Output", col=2, lbl="Interference 2", color="#FFFF2020", mode="AD" },
+  { name="Encryption Mode",ct="Indicator", it="Text",    pin="Output", col=2, lbl="Encryption" },
+  { name="Encryption Error",ct="Indicator",it="Led",     pin="Output", col=2, lbl="Encryption Error", color="#FFFF2020" },
+  { name="Unregistered TX",ct="Indicator", it="Led",     pin="Output", col=2, lbl="Unregistered TX", color="#FFFF8000", mode="AD" },
+  { name="Unregistered TX 2",ct="Indicator",it="Led",    pin="Output", col=2, lbl="Unregistered TX 2", color="#FFFF8000", mode="AD" },
+
+  -- Meters
+  { name="Audio Peak",     ct="Indicator", it="Meter", min=-60, max=0,   pin="Output", col=3, lbl="Audio Peak dBFS", meter="Standard" },
+  { name="Audio RMS",      ct="Indicator", it="Meter", min=-60, max=0,   pin="Output", col=3, lbl="Audio RMS dBFS",  meter="Standard" },
+  { name="Audio Clip",     ct="Indicator", it="Led",   pin="Output", col=3, lbl="Audio OL", color="#FFFF2020" },
+  { name="RF Level",       ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RF Level dBm", meter="Level" },
+  { name="Quality",        ct="Indicator", it="Meter", min=0, max=5,     pin="Output", col=3, lbl="Channel Quality", meter="Level", mode="AD" },
+  { name="RSSI A",         ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI A", meter="Level", led="Antenna A" },
+  { name="RSSI B",         ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI B", meter="Level", led="Antenna B" },
+  { name="RSSI C",         ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI C", meter="Level", led="Antenna C", mode="AD" },
+  { name="RSSI D",         ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI D", meter="Level", led="Antenna D", mode="AD" },
+  { name="RSSI F2 A",      ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI F2 A (FD-C)", meter="Level", mode="AD" },
+  { name="RSSI F2 B",      ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI F2 B (FD-C)", meter="Level", mode="AD" },
+  { name="RSSI F2 C",      ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI F2 C (FD-C)", meter="Level", mode="AD" },
+  { name="RSSI F2 D",      ct="Indicator", it="Meter", min=-100, max=-20, pin="Output", col=3, lbl="RSSI F2 D (FD-C)", meter="Level", mode="AD" },
+  -- Antenna LEDs are laid out next to their RSSI meter (layout="none")
+  { name="Antenna A",      ct="Indicator", it="Led",   pin="Output", layout="none" },
+  { name="Antenna B",      ct="Indicator", it="Led",   pin="Output", layout="none" },
+  { name="Antenna C",      ct="Indicator", it="Led",   pin="Output", layout="none", mode="AD" },
+  { name="Antenna D",      ct="Indicator", it="Led",   pin="Output", layout="none", mode="AD" },
+
+  -- Transmitter
+  { name="TX Present",     ct="Indicator", it="Led",   pin="Output", col=4, lbl="TX Present", color="#FF00C000" },
+  { name="TX Model",       ct="Indicator", it="Text",  pin="Output", col=4, lbl="Model" },
+  { name="TX Device ID",   ct="Indicator", it="Text",  pin="Output", col=4, lbl="Device ID" },
+  { name="TX Firmware",    ct="Indicator", it="Text",  pin="Output", col=4, lbl="Firmware", mode="AD" },
+  { name="TX Muted",       ct="Indicator", it="Led",   pin="Output", col=4, lbl="TX Muted", color="#FFFF8000" },
+  { name="TX Mute Status", ct="Indicator", it="Text",  pin="Output", col=4, lbl="TX Mute Mode" },
+  { name="TX Mute Button", ct="Indicator", it="Text",  pin="Output", col=4, lbl="Mute Button", mode="ULXD" },
+  { name="TX Power",       ct="Indicator", it="Text",  pin="Output", col=4, lbl="RF Power" },
+  { name="TX Power Source",ct="Indicator", it="Text",  pin="Output", col=4, lbl="Power Source" },
+  { name="TX Lock",        ct="Indicator", it="Text",  pin="Output", col=4, lbl="Lock", mode="AD" },
+  { name="TX Offset",      ct="Indicator", it="Text",  pin="Output", col=4, lbl="Offset", mode="AD" },
+  { name="TX Input Pad",   ct="Indicator", it="Text",  pin="Output", col=4, lbl="Input Pad", mode="AD" },
+  { name="TX Polarity",    ct="Indicator", it="Text",  pin="Output", col=4, lbl="Polarity", mode="AD" },
+  { name="TX Phantom",     ct="Indicator", it="Text",  pin="Output", col=4, lbl="Phantom", mode="AD" },
+  { name="TX HPF",         ct="Indicator", it="Text",  pin="Output", col=4, lbl="High Pass", mode="AD" },
+  { name="TX Talk Switch", ct="Indicator", it="Led",   pin="Output", col=4, lbl="Talk Switch", color="#FF00A0FF", mode="AD" },
+
+  -- Battery
+  { name="Battery Bars",   ct="Indicator", it="Meter", min=0, max=5,   pin="Output", col=5, lbl="Bars (0-5)", meter="Level" },
+  { name="Battery Charge", ct="Indicator", it="Meter", min=0, max=100, pin="Output", col=5, lbl="Charge %", meter="Level" },
+  { name="Battery Runtime",ct="Indicator", it="Text",  pin="Output", col=5, lbl="Runtime" },
+  { name="Battery Minutes",ct="Indicator", it="Text",  pin="Output", col=5, lbl="Runtime (min)" },
+  { name="Battery Type",   ct="Indicator", it="Text",  pin="Output", col=5, lbl="Type" },
+  { name="Battery Health", ct="Indicator", it="Text",  pin="Output", col=5, lbl="Health" },
+  { name="Battery Cycles", ct="Indicator", it="Text",  pin="Output", col=5, lbl="Cycle Count" },
+  { name="Battery Temp",   ct="Indicator", it="Text",  pin="Output", col=5, lbl="Temperature" },
+  { name="Battery Low",    ct="Indicator", it="Led",   pin="Output", col=5, lbl="Battery Low", color="#FFFF2020" },
+}
+
+-- Device level controls (single instances)
+local DEV = {
+  { name="IP Address",        ct="Text",      pin="Both",   lbl="IP Address" },
+  { name="Reconnect",         ct="Button",    bt="Trigger", pin="Input", lbl="Reconnect" },
+  { name="Status",            ct="Indicator", it="Status",  pin="Output", lbl="Status", h=36 },
+  { name="Model",             ct="Indicator", it="Text",    pin="Output", lbl="Model" },
+  { name="Device ID",         ct="Indicator", it="Text",    pin="Output", lbl="Device ID" },
+  { name="Firmware",          ct="Indicator", it="Text",    pin="Output", lbl="Firmware" },
+  { name="Device Mode",       ct="Indicator", it="Text",    pin="Output", lbl="Transmission Mode" },
+  { name="Mode Mismatch",     ct="Indicator", it="Led",     pin="Output", lbl="Mode Mismatch", color="#FFFF2020" },
+  { name="Licensed Channels", ct="Indicator", it="Text",    pin="Output", lbl="Licensed Channels" },
+  { name="Available Channels",ct="Indicator", it="Text",    pin="Output", lbl="Available Channels" },
+  { name="Dante Device Name", ct="Indicator", it="Text",    pin="Output", lbl="Dante Device Name" },
+  { name="Control IP",        ct="Indicator", it="Text",    pin="Output", lbl="Control Network" },
+  { name="Device Identify",   ct="Button",    bt="Trigger", pin="Input",  lbl="Identify Device" },
+  { name="All Mute",          ct="Button",    bt="Toggle",  pin="Both",   lbl="Mute All", color="#FFE00000" },
+}
+
+local function ModeKey(props)
+  return (props["Transmission Mode"].Value == MODE_ULXD) and "ULXD" or "AD"
+end
+
+local function ChannelCount(props)
+  local n = math.floor(tonumber(props["Licensed Channels"].Value) or 1)
+  if n < 1 then n = 1 elseif n > MAX_CHANNELS then n = MAX_CHANNELS end
+  return n
+end
+
+local function InMode(spec, mk)
+  return spec.mode == nil or spec.mode == mk
+end
+
+-------------------------------------------------------------------------------
+-- Design-time functions
+-------------------------------------------------------------------------------
+
+function GetColor(props)
+  return { 36, 64, 110 }
+end
+
+function GetPrettyName(props)
+  return string.format("Shure ANX4\n%s - %d ch\nv%s", props["Transmission Mode"].Value, ChannelCount(props), PluginInfo.Version)
+end
+
+local function PageNames(props)
+  local pages = { "Overview", "Device" }
+  for i = 1, ChannelCount(props) do pages[#pages + 1] = "Channel " .. i end
+  return pages
+end
+
+function GetPages(props)
+  local pages = {}
+  for _, n in ipairs(PageNames(props)) do table.insert(pages, { name = n }) end
+  return pages
+end
+
+function GetProperties()
+  return {
+    { Name = "Transmission Mode", Type = "enum", Choices = { MODE_AD, MODE_ULXD }, Value = MODE_AD },
+    { Name = "Licensed Channels", Type = "integer", Min = 1, Max = MAX_CHANNELS, Value = 8 },
+    { Name = "Meter Rate (ms)",   Type = "integer", Min = 100, Max = 5000, Value = 200 },
+    { Name = "Debug Print",       Type = "enum", Choices = { "None", "Tx/Rx", "Tx", "Rx", "All" }, Value = "None" },
+  }
+end
+
+function RectifyProperties(props)
+  return props
+end
+
+local function MakeControl(spec, count)
+  local c = {
+    Name = spec.name,
+    ControlType = spec.ct,
+    Count = count,
+    UserPin = true,
+    PinStyle = spec.pin or "Both",
+  }
+  if spec.ct == "Button" then
+    c.ButtonType = spec.bt
+  elseif spec.ct == "Indicator" then
+    c.IndicatorType = spec.it
+    if spec.it == "Meter" then c.Min = spec.min; c.Max = spec.max end
+  elseif spec.ct == "Knob" then
+    c.ControlUnit = spec.unit or "Integer"
+    c.Min = spec.min; c.Max = spec.max
+  end
+  return c
+end
+
+function GetControls(props)
+  local ctrls = {}
+  local mk, n = ModeKey(props), ChannelCount(props)
+  for _, s in ipairs(DEV) do table.insert(ctrls, MakeControl(s, 1)) end
+  for _, s in ipairs(CH) do
+    if InMode(s, mk) then table.insert(ctrls, MakeControl(s, n)) end
+  end
+  return ctrls
+end
+
+-- Layout helpers -------------------------------------------------------------
+
+local LBL_W, CTL_W, ROW_H, ROW_GAP = 116, 140, 18, 4
+local COL_W = LBL_W + CTL_W + 26
+
+local function LayoutStyle(spec)
+  if spec.style then return spec.style end
+  if spec.ct == "Button" then return "Button" end
+  if spec.ct == "Knob" then return "Knob" end
+  if spec.ct == "Text" then return "Text" end
+  if spec.it == "Led" then return "Led" end
+  if spec.it == "Meter" then return "Meter" end
+  return "Indicator"
+end
+
+local function ItemFor(spec, prettyPrefix, pos, size)
+  local item = {
+    PrettyName = prettyPrefix .. spec.name,
+    Style = LayoutStyle(spec),
+    Position = pos,
+    Size = size,
+    FontSize = 10,
+  }
+  if spec.ct == "Button" then
+    item.ButtonStyle = spec.bt
+    item.Legend = spec.lbl
+    if spec.color then item.Color = spec.color end
+  end
+  if spec.it == "Meter" then
+    item.MeterStyle = spec.meter or "Level"
+    item.ShowTextbox = true
+  end
+  if spec.it == "Led" then
+    item.Color = spec.color or "#FF0080FF"
+    item.UnlinkOffColor = true
+    item.OffColor = "#FF303030"
+  end
+  if spec.it == "Status" then item.TextFontSize = 10 end
+  return item
+end
+
+local function CtlKey(name, ch, n)
+  if n == 1 then return name end
+  return name .. " " .. ch
+end
+
+local function Label(graphics, text, x, y, w, h, align, size)
+  table.insert(graphics, {
+    Type = "Text", Text = text, Position = { x, y }, Size = { w, h or ROW_H },
+    FontSize = size or 10, HTextAlign = align or "Right",
+  })
+end
+
+local function Box(graphics, text, x, y, w, h)
+  table.insert(graphics, {
+    Type = "GroupBox", Text = text, Position = { x, y }, Size = { w, h },
+    Fill = { 236, 238, 242 }, StrokeWidth = 1, CornerRadius = 6, HTextAlign = "Left", FontSize = 12,
+  })
+end
+
+local function LayoutDevice(layout, graphics, props)
+  local x, y = 10, 10
+  y = 30
+  for _, s in ipairs(DEV) do
+    local h = s.h or ROW_H
+    local w = CTL_W
+    if s.it == "Led" then w = 16; h = 16 end
+    Label(graphics, s.lbl, x, y, LBL_W, ROW_H)
+    layout[s.name] = ItemFor(s, "Device~", { x + LBL_W + 8, y }, { w, h })
+    y = y + h + ROW_GAP
+  end
+  y = y + 6
+  Label(graphics, string.format("Plugin: %s mode, %d channels. TCP port %d.\nEnable Command Strings on the ANX4:\nDevice Configuration > Network Services.",
+    props["Transmission Mode"].Value, ChannelCount(props), PORT), x, y, LBL_W + CTL_W + 10, 44, "Left", 9)
+  local box = {}
+  Box(box, "ANX4 Device", 0, 0, LBL_W + CTL_W + 40, y + 54)
+  table.insert(graphics, 1, box[1])
+end
+
+local function LayoutChannel(layout, graphics, props, ch)
+  local mk, n = ModeKey(props), ChannelCount(props)
+  local prefix = string.format("Ch %02d~", ch)
+  local colY, colH = {}, {}
+  for c = 1, #COLS do colY[c] = 30 end
+  -- First pass: rows
+  local rows = {}
+  for _, s in ipairs(CH) do
+    if InMode(s, mk) and s.layout ~= "none" then table.insert(rows, s) end
+  end
+  for _, s in ipairs(rows) do
+    local c = s.col
+    local x = (c - 1) * COL_W + 4
+    local y = colY[c]
+    local w, h = s.w or CTL_W, s.h or ROW_H
+    if s.it == "Led" then w, h = 16, 16 end
+    if s.it == "Meter" and s.led then w = CTL_W - 22 end
+    Label(graphics, s.lbl, x, y, LBL_W, ROW_H)
+    layout[CtlKey(s.name, ch, n)] = ItemFor(s, prefix, { x + LBL_W + 6, y }, { w, h })
+    if s.led then
+      local ledSpec
+      for _, l in ipairs(CH) do if l.name == s.led then ledSpec = l end end
+      if ledSpec and InMode(ledSpec, mk) then
+        layout[CtlKey(ledSpec.name, ch, n)] = ItemFor(ledSpec, prefix, { x + LBL_W + 6 + w + 4, y + 1 }, { 16, 16 })
+      end
+    end
+    colY[c] = y + h + ROW_GAP
+  end
+  local maxY = 0
+  for c = 1, #COLS do if colY[c] > maxY then maxY = colY[c] end end
+  -- Group boxes must be drawn first (underneath the labels)
+  local boxes = {}
+  for c = 1, #COLS do
+    Box(boxes, COLS[c], (c - 1) * COL_W, 4, COL_W - 6, maxY + 4)
+  end
+  for i = #boxes, 1, -1 do table.insert(graphics, 1, boxes[i]) end
+  table.insert(graphics, {
+    Type = "Header", Text = string.format("Channel %d  (%s mode)", ch, props["Transmission Mode"].Value),
+    Position = { 0, maxY + 14 }, Size = { #COLS * COL_W - 6, 16 }, FontSize = 11, HTextAlign = "Left",
+  })
+end
+
+local STRIP_W, STRIP_H, STRIPS_PER_ROW = 84, 262, 12
+
+local function SpecByName(name)
+  for _, s in ipairs(CH) do if s.name == name then return s end end
+end
+
+local function LayoutOverview(layout, graphics, props)
+  local mk, n = ModeKey(props), ChannelCount(props)
+  -- device strip
+  local devMute = DEV[#DEV]
+  for i = 1, n do
+    local col = (i - 1) % STRIPS_PER_ROW
+    local row = math.floor((i - 1) / STRIPS_PER_ROW)
+    local ox, oy = col * STRIP_W, row * (STRIP_H + 8) + 44
+    local p = string.format("Ch %02d~", i)
+    local function put(name, x, y, w, h, extra)
+      local s = SpecByName(name)
+      local it = ItemFor(s, p, { ox + x, oy + y }, { w, h })
+      if extra then for k, v in pairs(extra) do it[k] = v end end
+      layout[CtlKey(name, i, n)] = it
+    end
+    Box(graphics, "", ox, oy, STRIP_W - 4, STRIP_H)
+    Label(graphics, "CH " .. i, ox + 2, oy + 4, STRIP_W - 8, 14, "Center", 11)
+    put("Channel Name", 4, 20, STRIP_W - 12, 18)
+    put("Mute", 4, 40, STRIP_W - 12, 20)
+    put("RF Level", 8, 64, 26, 120, { ShowTextbox = false })
+    put("Audio Peak", 44, 64, 26, 120, { ShowTextbox = false })
+    Label(graphics, "RF", ox + 8, oy + 186, 26, 12, "Center", 9)
+    Label(graphics, "AF", ox + 44, oy + 186, 26, 12, "Center", 9)
+    put("Battery Bars", 4, 200, STRIP_W - 12, 12, { ShowTextbox = false })
+    put("Battery Runtime", 4, 214, STRIP_W - 12, 16)
+    put("TX Present", 8, 234, 14, 14)
+    put("Alarm", 34, 234, 14, 14)
+    put("Audio Clip", 60, 234, 14, 14)
+    Label(graphics, "TX", ox + 2, oy + 248, 26, 10, "Center", 8)
+    Label(graphics, "ALM", ox + 28, oy + 248, 26, 10, "Center", 8)
+    Label(graphics, "OL", ox + 54, oy + 248, 26, 10, "Center", 8)
+  end
+  -- device header row
+  layout["Status"] = ItemFor(DEV[3], "Device~", { 0, 4 }, { 260, 32 })
+  local devModel = DEV[4]
+  layout["All Mute"] = ItemFor(devMute, "Device~", { 270, 8 }, { 80, 24 })
+  Label(graphics, string.format("%s mode  |  %d ch", props["Transmission Mode"].Value, n), 360, 10, 200, 20, "Left", 11)
+end
+
+function GetControlLayout(props)
+  local layout, graphics = {}, {}
+  local pages = PageNames(props)
+  local idx = props["page_index"] and props["page_index"].Value or 1
+  local page = pages[idx] or "Overview"
+  if page == "Overview" then
+    LayoutOverview(layout, graphics, props)
+  elseif page == "Device" then
+    LayoutDevice(layout, graphics, props)
+  else
+    local ch = tonumber(page:match("Channel (%d+)"))
+    if ch then LayoutChannel(layout, graphics, props, ch) end
+  end
+  return layout, graphics
+end
+
+-------------------------------------------------------------------------------
+-- Runtime
+-------------------------------------------------------------------------------
+
+if Controls then
+
+  local MK = ModeKey(Properties)
+  local N = ChannelCount(Properties)
+  local METER_MS = math.floor(tonumber(Properties["Meter Rate (ms)"].Value) or 200)
+  local DEBUG = Properties["Debug Print"].Value
+
+  local function dbg(dir, s)
+    if DEBUG == "None" then return end
+    if DEBUG == "All" or DEBUG == "Tx/Rx" or DEBUG == dir then print(dir .. ": " .. s) end
+  end
+
+  ---------------------------------------------------------------------------
+  -- Control access helpers (channel controls are arrays when N > 1)
+  ---------------------------------------------------------------------------
+  local function CC(name, ch)
+    local c = Controls[name]
+    if c == nil then return nil end
+    if N == 1 then return c end
+    return c[ch]
+  end
+
+  local function SetStr(name, ch, s)
+    local c = CC(name, ch); if c then c.String = s or "" end
+  end
+  local function SetVal(name, ch, v)
+    local c = CC(name, ch); if c and v then c.Value = v end
+  end
+  local function SetBool(name, ch, b)
+    local c = CC(name, ch); if c then c.Boolean = b and true or false end
+  end
+  local function DevStr(name, s) if Controls[name] then Controls[name].String = s or "" end end
+  local function DevBool(name, b) if Controls[name] then Controls[name].Boolean = b and true or false end end
+
+  local function trim(s) return (s or ""):match("^%s*(.-)%s*$") end
+  local function unbrace(s)
+    local inner = (s or ""):match("^{(.*)}$")
+    return trim(inner or s)
+  end
+  local function num(s) return tonumber((s or ""):match("^%s*(%-?%d+)")) end
+
+  ---------------------------------------------------------------------------
+  -- Per-channel state (for derived values)
+  ---------------------------------------------------------------------------
+  local st = {}
+  local function ResetState(ch)
+    st[ch] = { interf = false, interf2 = false, encErr = false, unreg = false, unreg2 = false,
+               bars = 255, mins = 65535, txMute = false, txBtn = false, clip = false }
+  end
+  for ch = 1, N do ResetState(ch) end
+
+  local function UpdateDerived(ch)
+    local s = st[ch]
+    local battLow = (s.bars ~= 255 and s.bars <= 1) or s.mins == 65533
+    SetBool("Battery Low", ch, battLow)
+    SetBool("TX Muted", ch, s.txMute or s.txBtn)
+    SetBool("Alarm", ch, s.interf or s.interf2 or s.encErr or s.unreg or s.unreg2 or battLow)
+  end
+
+  ---------------------------------------------------------------------------
+  -- Socket + send queue
+  ---------------------------------------------------------------------------
+  local sock = TcpSocket.New()
+  sock.ReadTimeout = 0
+  sock.WriteTimeout = 0
+  sock.ReconnectTimeout = 5
+
+  local queue = {}
+  local rxBuf = ""
+  local lastRx = 0
+  local connected = false
+  local statusMsgs = {}
+
+  local function Now() return os.clock() end
+
+  local function SetStatus(v, s)
+    if Controls["Status"] then
+      Controls["Status"].Value = v
+      Controls["Status"].String = s or ""
+    end
+  end
+
+  local function RefreshStatus()
+    if not connected then return end
+    local warn = {}
+    for _, m in pairs(statusMsgs) do if m then table.insert(warn, m) end end
+    table.sort(warn)
+    if #warn > 0 then SetStatus(1, table.concat(warn, "; ")) else SetStatus(0, "") end
+  end
+
+  local function Send(cmd)
+    table.insert(queue, "< " .. cmd .. " >")
+  end
+
+  local sendTimer = Timer.New()
+  sendTimer.EventHandler = function()
+    if #queue > 0 and sock.IsConnected then
+      local msg = table.remove(queue, 1)
+      dbg("Tx", msg)
+      sock:Write(msg)
+    end
+  end
+  sendTimer:Start(0.02)
+
+  ---------------------------------------------------------------------------
+  -- Reset UI on disconnect
+  ---------------------------------------------------------------------------
+  local METER_NAMES = { "Audio Peak", "Audio RMS", "RF Level", "Quality",
+    "RSSI A", "RSSI B", "RSSI C", "RSSI D", "RSSI F2 A", "RSSI F2 B", "RSSI F2 C", "RSSI F2 D" }
+  local ANT = { "A", "B", "C", "D" }
+
+  local function ClearMeters(ch)
+    for _, m in ipairs(METER_NAMES) do
+      local c = CC(m, ch); if c then c.Value = -200 end
+    end
+    for _, a in ipairs(ANT) do SetBool("Antenna " .. a, ch, false) end
+    SetBool("Audio Clip", ch, false)
+  end
+  for ch = 1, N do ClearMeters(ch) end
+
+  ---------------------------------------------------------------------------
+  -- Value formatters
+  ---------------------------------------------------------------------------
+  local function FmtFreq(v)
+    local k = num(v)
+    if not k or k == 0 then return "--" end
+    return string.format("%.3f", k / 1000)
+  end
+
+  local function FmtMins(m)
+    if m == nil or m == 65535 then return "--" end
+    if m == 65534 then return "Calculating" end
+    if m == 65533 then return "Comm Warning" end
+    return string.format("%d:%02d", m // 60, m % 60)
+  end
+
+  local function Unknown255(v, fmt)
+    local n = num(v)
+    if n == nil or n == 255 then return "--" end
+    return fmt(n)
+  end
+
+  local function SetAntenna(ch, idx, ch_)
+    -- ch_ : one of B (blue / active), R (red / inactive), X (off), N (n/a)
+    local c = CC("Antenna " .. ANT[idx], ch)
+    if not c then return end
+    if ch_ == "B" then c.Color = "#FF2080FF"; c.Boolean = true
+    elseif ch_ == "R" then c.Color = "#FFFF2020"; c.Boolean = true
+    else c.Boolean = false end
+  end
+
+  ---------------------------------------------------------------------------
+  -- SAMPLE parser
+  -- < SAMPLE ch ALL qual audBitmap audPeak audRms antStats (bitmap rssi)* [antStatsF2 (bitmap rssi)*] >
+  ---------------------------------------------------------------------------
+  local function ParseSample(rest)
+    local t = {}
+    for w in rest:gmatch("%S+") do t[#t + 1] = w end
+    local ch = tonumber(t[1])
+    if not ch or ch < 1 or ch > N or t[2] ~= "ALL" then return end
+    local qual, bm, pk, rms = tonumber(t[3]), tonumber(t[4]), tonumber(t[5]), tonumber(t[6])
+    if qual and qual <= 5 then SetVal("Quality", ch, qual) else SetVal("Quality", ch, 0) end
+    if pk then SetVal("Audio Peak", ch, pk - 120) end
+    if rms then SetVal("Audio RMS", ch, rms - 120) end
+    if bm then SetBool("Audio Clip", ch, (bm & 0x80) ~= 0) end
+
+    local i, group, best = 7, 1, nil
+    while t[i] and group <= 2 do
+      local stats = t[i]
+      if not stats:match("^[BRXN]+$") then break end
+      i = i + 1
+      for pos = 1, math.min(#stats, 4) do
+        local s = stats:sub(pos, pos)
+        if s ~= "N" then
+          local rssi = tonumber(t[i + 1])
+          i = i + 2
+          if rssi then
+            local dbm = rssi - 120
+            if group == 1 then
+              SetVal("RSSI " .. ANT[pos], ch, dbm)
+              if s ~= "X" and (best == nil or dbm > best) then best = dbm end
+            else
+              SetVal("RSSI F2 " .. ANT[pos], ch, dbm)
+            end
+          end
+        end
+        if group == 1 then SetAntenna(ch, pos, s) end
+      end
+      group = group + 1
+    end
+    if best then SetVal("RF Level", ch, best) else SetVal("RF Level", ch, -200) end
+  end
+
+  ---------------------------------------------------------------------------
+  -- REP handlers
+  ---------------------------------------------------------------------------
+  local DevH, ChH = {}, {}
+
+  DevH.MODEL = function(v) DevStr("Model", unbrace(v)) end
+  DevH.DEVICE_ID = function(v) DevStr("Device ID", unbrace(v)) end
+  DevH.FW_VER = function(v)
+    local f = unbrace(v)
+    if f:find("%*") then f = f .. " (self-test FAILED)" end
+    DevStr("Firmware", f)
+  end
+  DevH.NA_DEVICE_NAME = function(v) DevStr("Dante Device Name", unbrace(v)) end
+  DevH.TRANSMISSION_MODE = function(v)
+    v = trim(v)
+    DevStr("Device Mode", v)
+    local devMode = v:match("^AD") and "AD" or (v:match("^ULXD") and "ULXD" or nil)
+    local mismatch = devMode ~= nil and devMode ~= MK
+    DevBool("Mode Mismatch", mismatch)
+    statusMsgs.mode = mismatch and string.format("Device is in %s mode, plugin set to %s", v, Properties["Transmission Mode"].Value) or nil
+    RefreshStatus()
+  end
+  DevH.NUMBER_CHANNELS_LICENSED = function(v)
+    local n = num(v) or 0
+    DevStr("Licensed Channels", tostring(n))
+    statusMsgs.lic = (n < N) and string.format("Device licensed for %d ch, plugin set to %d", n, N) or nil
+    RefreshStatus()
+  end
+  DevH.AVAILABLE_CHANNELS = function(v)
+    local list = unbrace(v)
+    DevStr("Available Channels", list)
+    local avail = {}
+    for d in list:gmatch("%d+") do avail[tonumber(d)] = true end
+    for ch = 1, N do SetBool("Available", ch, avail[ch]) end
+  end
+  DevH.NET_SETTINGS = function(v)
+    local iface, mode, ip, mask, gw, mac = v:match("^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s+(%S+)%s*(%S*)")
+    if iface == "SC" then DevStr("Control IP", string.format("%s %s / %s", mode, ip, mac or "")) end
+  end
+  DevH.FLASH = function(v) end
+  DevH.METER_RATE = function(v) end
+
+  ChH.CHAN_NAME = function(ch, v) SetStr("Channel Name", ch, unbrace(v)) end
+  ChH.NA_CHAN_NAME = function(ch, v) SetStr("Dante Name", ch, unbrace(v)) end
+  ChH.AUDIO_GAIN = function(ch, v) local n = num(v); if n then SetVal("Gain", ch, n - 18) end end
+  ChH.AUDIO_MUTE = function(ch, v) SetBool("Mute", ch, trim(v) == "ON") end
+  ChH.ENCRYPTION_MODE = function(ch, v) SetStr("Encryption Mode", ch, trim(v)) end
+  ChH.ENCRYPTION_STATUS = function(ch, v) st[ch].encErr = trim(v) == "ERROR"; SetBool("Encryption Error", ch, st[ch].encErr); UpdateDerived(ch) end
+  ChH.RF_BAND = function(ch, v) SetStr("RF Band", ch, unbrace(v)) end
+  ChH.ANTENNA_CONFIGURATION = function(ch, v) SetStr("Antenna Config", ch, trim(v)) end
+  ChH.FD_MODE = function(ch, v) SetStr("FD Mode", ch, trim(v)) end
+  ChH.FREQUENCY = function(ch, v) SetStr("Frequency", ch, FmtFreq(v)) end
+  ChH.FREQUENCY2 = function(ch, v) SetStr("Frequency 2", ch, FmtFreq(v)) end
+  ChH.GROUP_CHANNEL = function(ch, v) SetStr("Group Channel", ch, unbrace(v)) end
+  ChH.GROUP_CHANNEL2 = function(ch, v) SetStr("Group Channel 2", ch, unbrace(v)) end
+  ChH.INTERFERENCE_STATUS = function(ch, v) st[ch].interf = trim(v) == "DETECTED"; SetBool("Interference", ch, st[ch].interf); UpdateDerived(ch) end
+  ChH.INTERFERENCE_STATUS2 = function(ch, v) st[ch].interf2 = trim(v) == "DETECTED"; SetBool("Interference 2", ch, st[ch].interf2); UpdateDerived(ch) end
+  ChH.UNREGISTERED_TX_STATUS = function(ch, v) st[ch].unreg = trim(v) == "ERROR"; SetBool("Unregistered TX", ch, st[ch].unreg); UpdateDerived(ch) end
+  ChH.UNREGISTERED_TX_STATUS2 = function(ch, v) st[ch].unreg2 = trim(v) == "ERROR"; SetBool("Unregistered TX 2", ch, st[ch].unreg2); UpdateDerived(ch) end
+
+  -- Individually reported meter values (e.g. in response to GET x ALL)
+  ChH.AUDIO_LEVEL_PEAK = function(ch, v) local n = num(v); if n then SetVal("Audio Peak", ch, n - 120) end end
+  ChH.AUDIO_LEVEL_RMS = function(ch, v) local n = num(v); if n then SetVal("Audio RMS", ch, n - 120) end end
+  ChH.CHAN_QUALITY = function(ch, v) local n = num(v); SetVal("Quality", ch, (n and n <= 5) and n or 0) end
+  ChH.AUDIO_LED_BITMAP = function(ch, v) local n = num(v); if n then SetBool("Audio Clip", ch, (n & 0x80) ~= 0) end end
+  ChH.RSSI = function(ch, v)
+    local idx, val = v:match("^(%d+)%s+(%d+)")
+    idx, val = tonumber(idx), tonumber(val)
+    if idx and val and ANT[idx] then SetVal("RSSI " .. ANT[idx], ch, val - 120) end
+  end
+  ChH.ANTENNA_STATUS = function(ch, v)
+    v = trim(v)
+    for pos = 1, math.min(#v, 4) do SetAntenna(ch, pos, v:sub(pos, pos)) end
+  end
+  ChH.RSSI_LED_BITMAP = function(ch, v) end
+  ChH.METER_RATE = function(ch, v) end
+  ChH.FLASH = function(ch, v) end
+
+  -- Transmitter
+  ChH.TX_MODEL = function(ch, v)
+    local m = trim(v)
+    SetStr("TX Model", ch, m == "UNKNOWN" and "--" or m)
+    SetBool("TX Present", ch, m ~= "UNKNOWN" and m ~= "")
+  end
+  ChH.TX_DEVICE_ID = function(ch, v) local s = unbrace(v); SetStr("TX Device ID", ch, s == "" and "--" or s) end
+  ChH.TX_FW_VER = function(ch, v) local s = unbrace(v); SetStr("TX Firmware", ch, s == "" and "--" or s) end
+  ChH.TX_BATT_TYPE = function(ch, v)
+    local map = { LION = "Li-Ion", ALKA = "Alkaline", NIMH = "NiMH", LITH = "Lithium", WARN = "Charging", UNKN = "--" }
+    local s = trim(v); SetStr("Battery Type", ch, map[s] or s)
+  end
+  ChH.TX_BATT_BARS = function(ch, v)
+    local n = num(v) or 255
+    st[ch].bars = n
+    SetVal("Battery Bars", ch, (n == 255) and 0 or n)
+    UpdateDerived(ch)
+  end
+  ChH.TX_BATT_MINS = function(ch, v)
+    local n = num(v) or 65535
+    st[ch].mins = n
+    SetStr("Battery Runtime", ch, FmtMins(n))
+    SetStr("Battery Minutes", ch, (n <= 65532) and tostring(n) or "--")
+    UpdateDerived(ch)
+  end
+  ChH.TX_BATT_CHARGE_PERCENT = function(ch, v)
+    local n = num(v)
+    SetVal("Battery Charge", ch, (n and n <= 100) and n or 0)
+  end
+  ChH.TX_BATT_HEALTH_PERCENT = function(ch, v) SetStr("Battery Health", ch, Unknown255(v, function(n) return n .. " %" end)) end
+  ChH.TX_BATT_CYCLE_COUNT = function(ch, v)
+    local n = num(v); SetStr("Battery Cycles", ch, (n and n ~= 65535) and tostring(n) or "--")
+  end
+  ChH.TX_BATT_TEMP_C = function(ch, v)
+    SetStr("Battery Temp", ch, Unknown255(v, function(n)
+      local c = n - 40
+      return string.format("%d °C / %d °F", c, math.floor(c * 9 / 5 + 32 + 0.5))
+    end))
+  end
+  ChH.TX_BATT_TEMP_F = function(ch, v) end
+  ChH.TX_INPUT_PAD = function(ch, v)
+    SetStr("TX Input Pad", ch, Unknown255(v, function(n)
+      if n == 0 then return "Pad -12 dB" elseif n == 24 then return "Boost +12 dB" elseif n == 12 then return "Off (0 dB)" end
+      return string.format("%+d dB", n - 12)
+    end))
+  end
+  ChH.TX_OFFSET = function(ch, v) SetStr("TX Offset", ch, Unknown255(v, function(n) return string.format("%+d dB", n - 12) end)) end
+  ChH.TX_LOCK = function(ch, v) local s = trim(v); SetStr("TX Lock", ch, s == "UNKNOWN" and "--" or s) end
+  ChH.TX_MUTE_MODE_STATUS = function(ch, v)
+    local s = trim(v)
+    st[ch].txMute = (s == "MUTE")
+    SetStr("TX Mute Status", ch, s == "UNKNOWN" and "--" or s)
+    UpdateDerived(ch)
+  end
+  ChH.TX_MUTE_BUTTON_STATUS = function(ch, v)
+    local s = trim(v)
+    st[ch].txBtn = (s == "PRESSED")
+    SetStr("TX Mute Button", ch, s == "UNKN" and "--" or s)
+    UpdateDerived(ch)
+  end
+  ChH.TX_POLARITY = function(ch, v) local s = trim(v); SetStr("TX Polarity", ch, s == "UNKNOWN" and "--" or s) end
+  ChH.TX_POWER_LEVEL = function(ch, v)
+    local s = trim(v)
+    local n = tonumber(s)
+    if n then SetStr("TX Power", ch, n == 255 and "--" or (n .. " mW"))
+    else SetStr("TX Power", ch, s == "UNKNOWN" and "--" or s) end
+  end
+  ChH.TX_POWER_SOURCE = function(ch, v) local s = trim(v); SetStr("TX Power Source", ch, s == "UNKNOWN" and "--" or s) end
+  ChH.TX_TALK_SWITCH = function(ch, v) SetBool("TX Talk Switch", ch, trim(v) == "ON") end
+  ChH.TX_PHANTOM_POWER = function(ch, v)
+    SetStr("TX Phantom", ch, Unknown255(v, function(n) return n == 0 and "Off" or ("+" .. n .. " V") end))
+  end
+  ChH.TX_HIGH_PASS_FILTER = function(ch, v)
+    SetStr("TX HPF", ch, Unknown255(v, function(n) return n == 0 and "Off" or (n .. " Hz") end))
+  end
+
+  ---------------------------------------------------------------------------
+  -- Message dispatch
+  ---------------------------------------------------------------------------
+  local function HandleMessage(msg)
+    dbg("Rx", "< " .. msg .. " >")
+    local kind, rest = msg:match("^(%u+)%s*(.*)$")
+    if kind == "SAMPLE" then
+      ParseSample(rest)
+      return
+    end
+    if kind ~= "REP" then return end
+    if rest == "ERR" then dbg("Rx", "Device returned ERR"); return end
+
+    local ch, prop, val = rest:match("^(%d+)%s+([%w_]+)%s*(.*)$")
+    if ch then
+      ch = tonumber(ch)
+      if ch >= 1 and ch <= N then
+        local h = ChH[prop]
+        if h then h(ch, val) end
+      end
+      return
+    end
+    prop, val = rest:match("^([%w_]+)%s*(.*)$")
+    if prop and DevH[prop] then DevH[prop](val) end
+  end
+
+  -- Splits the RX stream into "< ... >" messages. Braced strings may contain
+  -- '<' / '>' characters, so braces are tracked explicitly.
+  local function ProcessBuffer()
+    while true do
+      local s = rxBuf:find("<", 1, true)
+      if not s then rxBuf = ""; return end
+      local inBrace, e = false, nil
+      for i = s + 1, #rxBuf do
+        local c = rxBuf:sub(i, i)
+        if c == "{" then inBrace = true
+        elseif c == "}" then inBrace = false
+        elseif c == ">" and not inBrace then e = i; break end
+      end
+      if not e then
+        rxBuf = rxBuf:sub(s)
+        if #rxBuf > 65536 then rxBuf = "" end
+        return
+      end
+      local inner = trim(rxBuf:sub(s + 1, e - 1))
+      rxBuf = rxBuf:sub(e + 1)
+      local ok, err = pcall(HandleMessage, inner)
+      if not ok then print("Parse error: " .. tostring(err) .. " in: " .. inner) end
+    end
+  end
+
+  ---------------------------------------------------------------------------
+  -- Connection lifecycle
+  ---------------------------------------------------------------------------
+  local function InitialPoll()
+    queue = {}
+    for _, p in ipairs({ "MODEL", "DEVICE_ID", "FW_VER", "TRANSMISSION_MODE",
+                         "NUMBER_CHANNELS_LICENSED", "AVAILABLE_CHANNELS", "NA_DEVICE_NAME" }) do
+      Send("GET " .. p)
+    end
+    Send("GET NET_SETTINGS SC")
+    for ch = 1, N do Send(string.format("GET %d ALL", ch)) end
+    for ch = 1, N do Send(string.format("SET %d METER_RATE %05d", ch, METER_MS)) end
+  end
+
+  local function OnDisconnected(msg, statusVal)
+    connected = false
+    SetStatus(statusVal or 4, msg)
+    for ch = 1, N do ClearMeters(ch) end
+  end
+
+  sock.EventHandler = function(s, evt, err)
+    if evt == TcpSocket.Events.Connected then
+      connected = true
+      lastRx = Now()
+      rxBuf = ""
+      statusMsgs = {}
+      SetStatus(5, "Connected - polling")
+      InitialPoll()
+    elseif evt == TcpSocket.Events.Reconnect then
+      SetStatus(5, "Reconnecting...")
+    elseif evt == TcpSocket.Events.Data then
+      local data = s:Read(s.BufferLength)
+      if data and #data > 0 then
+        lastRx = Now()
+        if Controls["Status"].Value == 5 then RefreshStatus() end
+        rxBuf = rxBuf .. data
+        ProcessBuffer()
+      end
+    elseif evt == TcpSocket.Events.Closed then
+      OnDisconnected("Connection closed", 4)
+    elseif evt == TcpSocket.Events.Error then
+      OnDisconnected("Socket error: " .. tostring(err), 4)
+    elseif evt == TcpSocket.Events.Timeout then
+      OnDisconnected("Timeout", 4)
+    end
+  end
+
+  local function Connect()
+    if sock.IsConnected then sock:Disconnect() end
+    connected = false
+    local ip = trim(Controls["IP Address"].String)
+    if ip == "" then
+      SetStatus(3, "Enter IP address")
+      return
+    end
+    SetStatus(5, "Connecting to " .. ip)
+    sock:Connect(ip, PORT)
+  end
+
+  -- Heartbeat / comms watchdog
+  local hbTimer = Timer.New()
+  local hbCount = 0
+  hbTimer.EventHandler = function()
+    if not sock.IsConnected then return end
+    hbCount = hbCount + 1
+    if hbCount % 3 == 0 then Send("GET DEVICE_ID") end   -- every 15 s
+    if Now() - lastRx > 30 then
+      print("No data for 30 s - reconnecting")
+      OnDisconnected("No response - reconnecting", 2)
+      Connect()
+    end
+  end
+  hbTimer:Start(5)
+
+  ---------------------------------------------------------------------------
+  -- Control event handlers
+  ---------------------------------------------------------------------------
+  Controls["IP Address"].EventHandler = Connect
+  Controls["Reconnect"].EventHandler = Connect
+  Controls["Device Identify"].EventHandler = function() Send("SET FLASH ON") end
+  Controls["All Mute"].EventHandler = function(c)
+    Send("SET 0 AUDIO_MUTE " .. (c.Boolean and "ON" or "OFF"))
+  end
+
+  local function ParseFreqInput(s)
+    s = trim(s):gsub("[^%d%.]", "")
+    local f = tonumber(s)
+    if not f then return nil end
+    if s:find("%.") or f < 10000 then return math.floor(f * 1000 + 0.5) end  -- MHz entered
+    return math.floor(f + 0.5)                                               -- kHz entered
+  end
+
+  for ch = 1, N do
+    local c
+
+    c = CC("Mute", ch)
+    if c then c.EventHandler = function(ctl) Send(string.format("SET %d AUDIO_MUTE %s", ch, ctl.Boolean and "ON" or "OFF")) end end
+
+    c = CC("Gain", ch)
+    if c then c.EventHandler = function(ctl)
+      local db = math.floor(ctl.Value + 0.5)
+      if db < -18 then db = -18 elseif db > 42 then db = 42 end
+      Send(string.format("SET %d AUDIO_GAIN %03d", ch, db + 18))
+    end end
+
+    c = CC("Flash", ch)
+    if c then c.EventHandler = function() Send(string.format("SET %d FLASH ON", ch)) end end
+
+    c = CC("Channel Name", ch)
+    if c then c.EventHandler = function(ctl)
+      local name = trim(ctl.String):gsub("[{}]", ""):sub(1, 8)
+      Send(string.format("SET %d CHAN_NAME {%s}", ch, name))
+    end end
+
+    for _, pair in ipairs({ { "Frequency", "FREQUENCY" }, { "Frequency 2", "FREQUENCY2" } }) do
+      c = CC(pair[1], ch)
+      if c then c.EventHandler = function(ctl)
+        local khz = ParseFreqInput(ctl.String)
+        if khz then Send(string.format("SET %d %s %06d", ch, pair[2], khz))
+        else Send(string.format("GET %d %s", ch, pair[2])) end
+      end end
+    end
+
+    for _, pair in ipairs({ { "Group Channel", "GROUP_CHANNEL" }, { "Group Channel 2", "GROUP_CHANNEL2" } }) do
+      c = CC(pair[1], ch)
+      if c then c.EventHandler = function(ctl)
+        local g, chn = trim(ctl.String):match("^(%d+)%s*,%s*(%d+)$")
+        if g then Send(string.format("SET %d %s {%s,%s}", ch, pair[2], g, chn))
+        else Send(string.format("GET %d %s", ch, pair[2])) end
+      end end
+    end
+  end
+
+  ---------------------------------------------------------------------------
+  -- Start
+  ---------------------------------------------------------------------------
+  Connect()
+
+end
