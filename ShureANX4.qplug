@@ -1,15 +1,15 @@
 -- Shure ANX4 Scalable Wireless Receiver - Q-SYS Plugin
 -- Control via Shure command strings (TCP 2202).
 -- Supports Axient Digital (up to 16 ch) and ULX-D (up to 24 ch) transmission modes.
--- Channels are licensed in banks of 4.
+-- Channels are licensed in single or 4-channel increments.
 --
 -- Prerequisite on the ANX4: Device Configuration > Network Services > Command Strings = ON
 -- Audio is NOT carried by this plugin - route it via Dante / AES67 as usual.
 
 PluginInfo = {
   Name = "Shure~ANX4 Scalable Wireless Receiver",
-  Version = "1.1.0",
-  BuildVersion = "1.1.0.0",
+  Version = "1.2.0",
+  BuildVersion = "1.2.0.0",
   Id = "72c7835a-4a1f-4275-9747-3ad1ada208ee",
   Author = "",
   Description = "Control and monitoring of the Shure ANX4 (Axient Digital / ULX-D modes): RF, audio metering, battery, mute, gain, frequency and transmitter status.",
@@ -27,7 +27,7 @@ local PROP_CH = { AD = "Licensed Channels (Axient Digital)", ULXD = "Licensed Ch
 
 local function ChannelChoices(max)
   local t = {}
-  for n = 0, max, 4 do t[#t + 1] = tostring(n) end
+  for n = 0, max do t[#t + 1] = tostring(n) end
   return t
 end
 local PORT = 2202
