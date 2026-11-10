@@ -1,14 +1,15 @@
 -- Shure ANX4 Scalable Wireless Receiver - Q-SYS Plugin
 -- Control via Shure command strings (TCP 2202).
--- Supports Axient Digital and ULX-D transmission modes, 1-24 licensed channels.
+-- Supports Axient Digital (up to 16 ch) and ULX-D (up to 24 ch) transmission modes.
+-- Channels are licensed in banks of 4.
 --
 -- Prerequisite on the ANX4: Device Configuration > Network Services > Command Strings = ON
 -- Audio is NOT carried by this plugin - route it via Dante / AES67 as usual.
 
 PluginInfo = {
   Name = "Shure~ANX4 Scalable Wireless Receiver",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Version = "1.1.0",
+  BuildVersion = "1.1.0.0",
   Id = "72c7835a-4a1f-4275-9747-3ad1ada208ee",
   Author = "",
   Description = "Control and monitoring of the Shure ANX4 (Axient Digital / ULX-D modes): RF, audio metering, battery, mute, gain, frequency and transmitter status.",
@@ -21,7 +22,14 @@ PluginInfo = {
 
 local MODE_AD   = "Axient Digital"
 local MODE_ULXD = "ULX-D"
-local MAX_CHANNELS = 24
+local MAX_CHANNELS = { AD = 16, ULXD = 24 }
+local PROP_CH = { AD = "Licensed Channels (Axient Digital)", ULXD = "Licensed Channels (ULX-D)" }
+
+local function ChannelChoices(max)
+  local t = {}
+  for n = 0, max, 4 do t[#t + 1] = tostring(n) end
+  return t
+end
 local PORT = 2202
 
 -- Layout columns on each channel page
@@ -130,8 +138,10 @@ local function ModeKey(props)
 end
 
 local function ChannelCount(props)
-  local n = math.floor(tonumber(props["Licensed Channels"].Value) or 1)
-  if n < 1 then n = 1 elseif n > MAX_CHANNELS then n = MAX_CHANNELS end
+  local mk = ModeKey(props)
+  local p = props[PROP_CH[mk]]
+  local n = math.floor(tonumber(p and p.Value) or 0)
+  if n < 0 then n = 0 elseif n > MAX_CHANNELS[mk] then n = MAX_CHANNELS[mk] end
   return n
 end
 
@@ -166,13 +176,18 @@ end
 function GetProperties()
   return {
     { Name = "Transmission Mode", Type = "enum", Choices = { MODE_AD, MODE_ULXD }, Value = MODE_AD },
-    { Name = "Licensed Channels", Type = "integer", Min = 1, Max = MAX_CHANNELS, Value = 8 },
+    { Name = PROP_CH.AD,   Type = "enum", Choices = ChannelChoices(MAX_CHANNELS.AD),   Value = "8" },
+    { Name = PROP_CH.ULXD, Type = "enum", Choices = ChannelChoices(MAX_CHANNELS.ULXD), Value = "8" },
     { Name = "Meter Rate (ms)",   Type = "integer", Min = 100, Max = 5000, Value = 200 },
     { Name = "Debug Print",       Type = "enum", Choices = { "None", "Tx/Rx", "Tx", "Rx", "All" }, Value = "None" },
   }
 end
 
 function RectifyProperties(props)
+  -- Show only the channel selector for the active transmission mode
+  local mk = ModeKey(props)
+  props[PROP_CH.AD].IsHidden = (mk ~= "AD")
+  props[PROP_CH.ULXD].IsHidden = (mk ~= "ULXD")
   return props
 end
 
@@ -201,7 +216,7 @@ function GetControls(props)
   local mk, n = ModeKey(props), ChannelCount(props)
   for _, s in ipairs(DEV) do table.insert(ctrls, MakeControl(s, 1)) end
   for _, s in ipairs(CH) do
-    if InMode(s, mk) then table.insert(ctrls, MakeControl(s, n)) end
+    if n > 0 and InMode(s, mk) then table.insert(ctrls, MakeControl(s, n)) end
   end
   return ctrls
 end
@@ -370,6 +385,9 @@ local function LayoutOverview(layout, graphics, props)
   local devModel = DEV[4]
   layout["All Mute"] = ItemFor(devMute, "Device~", { 270, 8 }, { 80, 24 })
   Label(graphics, string.format("%s mode  |  %d ch", props["Transmission Mode"].Value, n), 360, 10, 200, 20, "Left", 11)
+  if n == 0 then
+    Label(graphics, "No channels selected. Set the licensed channel count in the plugin properties.", 0, 50, 500, 20, "Left", 11)
+  end
 end
 
 function GetControlLayout(props)

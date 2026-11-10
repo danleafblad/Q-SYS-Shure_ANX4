@@ -11,7 +11,8 @@ This plugin controls and monitors a Shure ANX4 scalable wireless receiver using 
 | Property | Values | Notes |
 |---|---|---|
 | Transmission Mode | Axient Digital / ULX-D | Sets which controls are created. AD adds channel quality, Quadversity (RSSI C/D), FD-C (Frequency 2, F2 RSSI, Interference 2), Unregistered TX and ADX transmitter detail. ULX-D adds the ULXD6/8 mute-button status. |
-| Licensed Channels | 1 – 24 | Number of channel pages/strips to build. Set it to match your licence. |
+| Licensed Channels (Axient Digital) | 0, 4, 8, 12, 16 | Shown only in Axient Digital mode. Licences come in banks of 4. 0 = device control only. |
+| Licensed Channels (ULX-D) | 0, 4, 8, 12, 16, 20, 24 | Shown only in ULX-D mode. |
 | Meter Rate (ms) | 100 – 5000 | Sent to each channel as `METER_RATE`. The default is 200 ms. |
 | Debug Print | None / Tx / Rx / Tx/Rx / All | Prints traffic to the debug window. |
 
